@@ -61,19 +61,21 @@ class AuthController extends Controller
         $credentials = $request->only('email', 'password');
 
         if (Auth::attempt($credentials)) {
-            
-            // 🔴 ITO YUNG BULONG SA VS CODE PARA MAWALA ANG PULA
             /** @var \App\Models\User $user */
             $user = Auth::user();
 
-            // 🔴 BAGONG DAGDAG: Gagawa tayo ng Sanctum Token (VIP Pass)
+            // Kunin ang barangay/purok mula sa residents table gamit ang contact number
+            $contactNumber = str_replace('@agos.lgu', '', $user->email);
+            $resident = \App\Models\Resident::where('contact_number', $contactNumber)->first();
+            $user->barangay = $resident ? $resident->barangay : 'Taytay, Rizal';
+
             $token = $user->createToken('AgosMobileApp')->plainTextToken;
 
             return response()->json([
                 'status' => 'success',
                 'message' => 'Login successful',
                 'user' => $user,
-                'token' => $token // 🔴 Ipapasa natin yung token pababa sa Android
+                'token' => $token
             ]);
         }
 

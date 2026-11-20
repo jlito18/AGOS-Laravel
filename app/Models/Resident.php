@@ -14,9 +14,7 @@ class Resident extends Model
     protected static function booted()
     {
         static::deleted(function ($resident) {
-            // Hahanapin na natin gamit ang first_name at last_name imbes na 'name' lang
-            \App\Models\User::where('first_name', $resident->first_name)
-                ->where('last_name', $resident->last_name)
+            \App\Models\User::where('email', $resident->contact_number . '@agos.lgu')
                 ->delete();
         });
     }

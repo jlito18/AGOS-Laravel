@@ -4,55 +4,43 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use App\Models\AlertLog;
 use App\Models\Threshold;
-use App\Models\User; // <-- Kailangan ito para mahanap natin ang mga Admin
-use Filament\Notifications\Notification; // <-- Kailangan ito para sa Bell Pop-up!
+use App\Models\User;
 
 class SensorController extends Controller
 {
     public function store(Request $request)
     {
-        // 1. Saluhin ang data galing sa ESP32
-        $water_level = $request->input('water_level_cm');
-        $rainfall = $request->input('rainfall_mm');
-        $water_flow = $request->input('water_flow_rate');
+        $water_level = (float) $request->input('water_level_cm', 0);
+        $rainfall = (float) $request->input('rainfall_mm', 0);
+        $water_flow = (float) $request->input('water_flow_rate', 0);
 
-        // 2. I-save sa 'readings' table
+        $settings = Threshold::first();
+        $readingStatus = 'Safe';
+
+        if ($settings) {
+            $analysis = $this->evaluateSensors($water_level, $rainfall, $water_flow, $settings);
+            $readingStatus = $analysis['reading_status'];
+
+            $this->logAlert($analysis['alert_level'], $analysis['alert_message']);
+        }
+
+        // I-save sa 'readings' table kasama ang totoong status
         DB::table('readings')->insert([
             'water_level_cm' => $water_level,
             'rainfall_mm' => $rainfall,
             'water_flow_rate' => $water_flow,
+            'status' => $readingStatus,
             'created_at' => now(),
-            'updated_at' => now()
+            'updated_at' => now(),
         ]);
 
-        // ==========================================================
-        // 🔴 ALERT LOGS LOGIC (SAMA-SAMA NA ANG 3 SENSORS!)
-        // ==========================================================
-        $settings = Threshold::first();
-
-        if ($settings) {
-            // A. HARDWARE ERROR DETECTION (Lahat ng sensors)
-            if ($water_level < 0 || $rainfall < 0 || $water_flow < 0) {
-                $this->logAlert('CRITICAL', 'System detected a hardware sensor error. Immediate maintenance required.');
-            }
-            // B. FLOOD DANGER (Kapag umabot sa limit ang TUBIG, ULAN, o AGOS)
-            elseif ($water_level <= $settings->water_danger_cm || $rainfall >= $settings->rain_danger_mm || $water_flow >= 10.0) {
-                $this->logAlert('CRITICAL', "DANGER THRESHOLD REACHED! Water: {$water_level}cm, Rain: {$rainfall}mm, Flow: {$water_flow}L/min. Evacuate immediately.");
-            }
-            // C. FLOOD WARNING (Kapag malapit na sa limit ang TUBIG, ULAN, o AGOS)
-            elseif ($water_level <= $settings->water_warning_cm || $rainfall >= $settings->rain_warning_mm || $water_flow >= 5.0) {
-                $this->logAlert('WARNING', "WARNING THRESHOLD REACHED. Water: {$water_level}cm, Rain: {$rainfall}mm, Flow: {$water_flow}L/min. Prepare for evacuation.");
-            }
-            // D. ALL CLEAR / NORMAL (Kapag safe na ang LAHAT ng sensors)
-            else {
-                $this->logAlert('NORMAL', "All sensors are at safe levels. Situation is back to normal.");
-            }
-        }
-        // ==========================================================
-
-        return response()->json(['message' => 'Sensor data saved successfully!'], 201);
+        return response()->json([
+            'message' => 'Sensor data saved successfully!',
+            'status' => $readingStatus,
+        ], 201);
     }
 
     public function latest()
@@ -61,45 +49,18 @@ class SensorController extends Controller
         $settings = DB::table('thresholds')->first();
 
         if ($latestReading && $settings) {
-            $waterStatus = "NORMAL";
-            if ($latestReading->water_level_cm <= $settings->water_danger_cm) {
-                $waterStatus = "DANGER";
-            } elseif ($latestReading->water_level_cm <= $settings->water_warning_cm) {
-                $waterStatus = "WARNING";
-            }
+            $analysis = $this->evaluateSensors(
+                (float) $latestReading->water_level_cm,
+                (float) $latestReading->rainfall_mm,
+                (float) $latestReading->water_flow_rate,
+                $settings
+            );
 
-            $rainStatus = "NORMAL";
-            if ($latestReading->rainfall_mm >= $settings->rain_danger_mm) {
-                $rainStatus = "DANGER";
-            } elseif ($latestReading->rainfall_mm >= $settings->rain_warning_mm) {
-                $rainStatus = "WARNING";
-            }
-
-            $flowStatus = "NORMAL";
-            if ($latestReading->water_flow_rate >= 10.0) {
-                $flowStatus = "DANGER";
-            } elseif ($latestReading->water_flow_rate >= 5.0) {
-                $flowStatus = "WARNING";
-            }
-
-            $residentStatus = "NORMAL / SAFE";
-
-            if ($waterStatus == "DANGER" && $flowStatus == "DANGER") {
-                $residentStatus = "CRITICAL / EVACUATE NOW";
-            } elseif ($waterStatus == "DANGER" && $flowStatus != "DANGER") {
-                $residentStatus = "WARNING / PREPARE";
-            } elseif ($rainStatus == "DANGER" || $rainStatus == "WARNING" || $flowStatus == "WARNING") {
-                $residentStatus = "WARNING / PREPARE";
-            } elseif ($waterStatus == "WARNING" && $rainStatus == "NORMAL" && $flowStatus == "NORMAL") {
-                $residentStatus = "NORMAL / SAFE";
-            }
-
-            $latestReading->system_status = $residentStatus;
-
+            $latestReading->system_status = $analysis['resident_status'];
             $latestReading->sensor_latitude = $settings->sensor_latitude ?? 14.5398;
             $latestReading->sensor_longitude = $settings->sensor_longitude ?? 121.1340;
             $latestReading->hazard_radius = $settings->hazard_radius_meters ?? 500;
-            
+
             return response()->json($latestReading, 200);
         }
 
@@ -107,32 +68,109 @@ class SensorController extends Controller
     }
 
     /**
-     * PRIVATE FUNCTION PARA SA LOGBOOK AT NOTIFICATION
+     * Centralized Multi-Sensor Cross-Verification Logic
+     * (Tugma sa LatestReadingWidget at Android App)
      */
-    /**
-     * PRIVATE FUNCTION PARA SA LOGBOOK AT NOTIFICATION
-     */
-    /**
-     * PRIVATE FUNCTION PARA SA LOGBOOK AT NOTIFICATION
-     * Gamit ang Brute Force DB Injection para sapilitang tumunog ang bell!
-     */
-    private function logAlert(string $level, string $message)
+    private function evaluateSensors(float $water, float $rain, float $flow, object $settings): array
     {
-        $lastLog = \App\Models\AlertLog::orderBy('created_at', 'desc')->first();
+        // 1. Individual Sensor Checks
+        $waterStatus = 'NORMAL';
+        if ($water < 0) {
+            $waterStatus = 'ERROR';
+        } elseif ($water <= $settings->water_danger_cm) {
+            $waterStatus = 'DANGER';
+        } elseif ($water <= $settings->water_warning_cm) {
+            $waterStatus = 'WARNING';
+        }
 
-        // Mag-save at mag-notify lang KUNG walang log o iba na yung level
+        $rainStatus = 'NORMAL';
+        if ($rain < 0) {
+            $rainStatus = 'ERROR';
+        } elseif ($rain >= $settings->rain_danger_mm) {
+            $rainStatus = 'DANGER';
+        } elseif ($rain >= $settings->rain_warning_mm) {
+            $rainStatus = 'WARNING';
+        }
+
+        $flowStatus = 'NORMAL';
+        if ($flow < 0) {
+            $flowStatus = 'ERROR';
+        } elseif ($flow >= 10.0) {
+            $flowStatus = 'DANGER';
+        } elseif ($flow >= 5.0) {
+            $flowStatus = 'WARNING';
+        }
+
+        // 2. Cross-Verification & Silent Monitoring
+        if ($waterStatus === 'ERROR' || $rainStatus === 'ERROR' || $flowStatus === 'ERROR') {
+            return [
+                'reading_status' => 'Danger',
+                'resident_status' => 'SYSTEM MAINTENANCE',
+                'alert_level' => 'CRITICAL',
+                'alert_message' => 'System detected a hardware sensor error. Immediate maintenance required.',
+            ];
+        }
+
+        if ($waterStatus === 'DANGER' && $flowStatus === 'DANGER') {
+            return [
+                'reading_status' => 'Danger',
+                'resident_status' => 'CRITICAL / EVACUATE NOW',
+                'alert_level' => 'CRITICAL',
+                'alert_message' => "VERIFIED FLOOD DANGER! Water: {$water}cm, Rain: {$rain}mm, Flow: {$flow}L/min. Evacuate immediately.",
+            ];
+        }
+
+        if ($waterStatus === 'DANGER' && $flowStatus !== 'DANGER') {
+            return [
+                'reading_status' => 'Warning',
+                'resident_status' => 'WARNING / PREPARE',
+                'alert_level' => 'WARNING',
+                'alert_message' => "UNVERIFIED WATER LEVEL (Check for Debris). Water: {$water}cm, Flow: {$flow}L/min.",
+            ];
+        }
+
+        if ($rainStatus === 'DANGER' || $rainStatus === 'WARNING' || $flowStatus === 'WARNING' || $flowStatus === 'DANGER') {
+            return [
+                'reading_status' => 'Warning',
+                'resident_status' => 'WARNING / PREPARE',
+                'alert_level' => 'WARNING',
+                'alert_message' => "FLOOD TREND DETECTED. Water: {$water}cm, Rain: {$rain}mm, Flow: {$flow}L/min. Prepare for evacuation.",
+            ];
+        }
+
+        if ($waterStatus === 'WARNING' && $rainStatus === 'NORMAL' && $flowStatus === 'NORMAL') {
+            return [
+                'reading_status' => 'Safe',
+                'resident_status' => 'NORMAL / SAFE',
+                'alert_level' => 'NORMAL',
+                'alert_message' => "Silent Monitoring: Water slightly elevated ({$water}cm) with normal rain and flow.",
+            ];
+        }
+
+        return [
+            'reading_status' => 'Safe',
+            'resident_status' => 'NORMAL / SAFE',
+            'alert_level' => 'NORMAL',
+            'alert_message' => 'All sensors are at safe levels. Situation is back to normal.',
+        ];
+    }
+
+    /**
+     * Save AlertLog + Send Filament Bell Notification to Admin/Staff only
+     */
+    private function logAlert(string $level, string $message): void
+    {
+        $lastLog = AlertLog::orderBy('created_at', 'desc')->first();
+
         if (!$lastLog || $lastLog->level !== $level) {
-
-            // 1. I-save sa Alert Logs Table natin
-            \App\Models\AlertLog::create([
+            AlertLog::create([
                 'level' => $level,
-                'message' => $message
+                'message' => $message,
             ]);
 
-            // 2. KUNIN LAHAT NG USERS
-            $users = \App\Models\User::all();
+            // Admin at Staff lang dapat ang makakatanggap ng web dashboard bell
+            $users = User::where('role', '!=', 'resident')->get();
 
-            // 3. BRUTE FORCE INSERT SA DATABASE (Walang kawala si Filament dito!)
             foreach ($users as $user) {
                 $color = 'success';
                 $icon = 'heroicon-o-check-circle';
@@ -145,8 +183,8 @@ class SensorController extends Controller
                     $icon = 'heroicon-o-exclamation-triangle';
                 }
 
-                \Illuminate\Support\Facades\DB::table('notifications')->insert([
-                    'id' => \Illuminate\Support\Str::uuid(),
+                DB::table('notifications')->insert([
+                    'id' => Str::uuid(),
                     'type' => 'Filament\Notifications\Database\Notifications\DatabaseNotification',
                     'notifiable_type' => get_class($user),
                     'notifiable_id' => $user->id,
@@ -154,7 +192,7 @@ class SensorController extends Controller
                         'actions' => [],
                         'body' => $message,
                         'color' => $color,
-                        'duration' => 'persistent', // Para hindi mawala hangga't di binabasa
+                        'duration' => 'persistent',
                         'icon' => $icon,
                         'iconColor' => $color,
                         'status' => $color,

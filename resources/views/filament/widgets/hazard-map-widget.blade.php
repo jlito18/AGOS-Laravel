@@ -40,14 +40,17 @@
                         let warningLvl = parseFloat('{{ $warningLevel }}');
                         let dangerLvl = parseFloat('{{ $dangerLevel }}');
 
-                        // Dynamic Color Logic based on Alert Level
+                       // Dynamic Color Logic based on Alert Level (pababa ang sukat ng ultrasonic)
                         let zoneColor = '#22c55e'; // Green (Normal/Safe)
                         let statusText = 'NORMAL (Safe)';
 
-                        if (waterLvl >= dangerLvl) {
+                        if (waterLvl < 0) {
+                            zoneColor = '#6b7280'; // Gray (Sensor Error)
+                            statusText = 'SENSOR ERROR (Maintenance Required)';
+                        } else if (waterLvl <= dangerLvl) {
                             zoneColor = '#ef4444'; // Red (Danger)
                             statusText = 'CRITICAL DANGER (Evacuate)';
-                        } else if (waterLvl >= warningLvl) {
+                        } else if (waterLvl <= warningLvl) {
                             zoneColor = '#f97316'; // Orange (Warning)
                             statusText = 'WARNING (Prepare to Evacuate)';
                         }

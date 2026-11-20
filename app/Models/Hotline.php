@@ -6,5 +6,5 @@ use Illuminate\Database\Eloquent\Model;
 
 class Hotline extends Model
 {
-    protected $guarded = []; // 🔴 Payagan ma-save lahat ng columns
+    protected $guarded = []; // Allow mass assignment for all fields
 }
